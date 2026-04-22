@@ -177,7 +177,7 @@ def run_demo(
 
     for h in range(scenario.hours):
         realtime_price, contract_price = _price_profile_for_hour(h)
-        actual_hour = scenario.actual_loads[h]
+        actual_hour = np.array(scenario.actual_loads[h], dtype=float, copy=True)
         pv_min = scenario.pv_forecast_min[h]
         pv_max = scenario.pv_forecast_max[h]
         pv_rt = None
@@ -191,6 +191,12 @@ def run_demo(
 
         day_idx = h // 24
         hourly_cap = float(market_hourly_cap[h])
+        if h < 24:
+            actual_total = float(np.sum(actual_hour))
+            if actual_total > 1e-9:
+                actual_hour *= hourly_cap / actual_total
+            else:
+                actual_hour = np.full_like(actual_hour, hourly_cap / max(1, len(actual_hour)), dtype=float)
         daily_remaining = max(0.0, procured_energy_by_day[day_idx] - daily_energy_consumed[day_idx])
         print(
             f"Hour {h}: forecast load [{lf_min:.1f}, {lf_max:.1f}], "
@@ -375,6 +381,7 @@ def run_demo(
                 event['day_load_min'] = day_load_min
                 event['day_load_max'] = day_load_max
                 event['day_pv_mid'] = pv_mid
+                event['day_market_hour_cap'] = [float(x) for x in market_hourly_cap[start:end]]
 
             try:
                 publisher(event)
@@ -429,6 +436,9 @@ def run_strategy_demo(
         base_demand=base_demand,
         seed=seed,
     )
+    # Demo tuning: make the synthetic market profile profitable by default.
+    prices.buy_qty = np.clip(prices.buy_qty * 0.78, 80.0, 3000.0)
+    prices.sell_price = np.clip(np.maximum(prices.sell_price, prices.buy_price * 2.6), 0.05, 3.50)
     hod = np.arange(hours) % 24
     day_factor = np.array([0.96, 1.00, 1.04])
     day_idx = np.arange(hours) // 24
@@ -436,7 +446,7 @@ def run_strategy_demo(
     demand_base = base_demand * (0.72 + 0.26 * np.sin(np.pi * hod / 12.0) + 0.12 * np.sin(2 * np.pi * hod / 24.0))
     estimated_demand = np.maximum(50.0, demand_base * day_factor[day_idx] * (1.0 + rng.normal(0, 0.03, hours)))
 
-    pv_base = (base_demand * 0.52) * np.maximum(0.0, np.sin(np.pi * (hod - 6) / 12.0))
+    pv_base = (base_demand * 0.82) * np.maximum(0.0, np.sin(np.pi * (hod - 6) / 12.0))
     pv_available = np.maximum(0.0, pv_base * (1.0 + rng.normal(0, 0.04, hours)))
 
     forecast_min = estimated_demand * 0.90
@@ -454,6 +464,7 @@ def run_strategy_demo(
     discharge_efficiency = 0.95
     soc_min = 10.0
     soc_max = 100.0
+    shortfall_guard_ratio = 0.06  # Conservative demand uplift for redispatch robustness.
 
     print("D-2 Purchase schedule generated: 72h")
     print(f"  buy_price  : min={float(np.min(prices.buy_price)):.3f}  max={float(np.max(prices.buy_price)):.3f}")
@@ -489,15 +500,31 @@ def run_strategy_demo(
                 pv_available_h = float(max(0.0, pv_realtime))
 
         if h < 24:
-            # Stage 1: direct simulation with reduced noise (0.01 for better forecast match).
+            # Stage 1: historical control basis is assumed perfect for the first 24h.
+            # Use market_hour_cap as actual load so the physical curve tracks the cap in 0-24h.
             load_adj = 0.0
             load_adj_requested = 0.0
-            storage_charge = 0.0
-            storage_discharge = 0.0
+            base_supply_h = float(prices.buy_qty[h]) + float(pv_available_h)
+            demand_ref = float(prices.buy_qty[h])
+
+            max_charge_now = min(
+                float(battery_power_kw),
+                max(0.0, (soc_max - soc) / max(charge_efficiency, 1e-6)),
+            )
+            max_discharge_now = min(
+                float(battery_power_kw),
+                max(0.0, (soc - soc_min) * discharge_efficiency),
+            )
+            deficit_h = max(0.0, demand_ref - base_supply_h)
+            surplus_h = max(0.0, base_supply_h - demand_ref)
+
+            # Prefer discharging to avoid shortfall; absorb surplus when possible.
+            storage_discharge = min(deficit_h, max_discharge_now)
+            storage_charge = min(surplus_h, max_charge_now)
             pv_curtail = 0.0
-            demand_exec = max(0.0, float(estimated_demand[h] * (1.0 + rng.normal(0, 0.01))))
+            demand_exec = demand_ref
             status = "DIRECT"
-            reason = "stage_0_24_direct"
+            reason = "stage_0_24_direct_perfect_midpoint"
         else:
             # Stage 2: before drawing each hour, re-dispatch using completed actual history.
             # In 25-72h, compute rolling average of recent demand bias and use to correct forecast.
@@ -515,9 +542,13 @@ def run_strategy_demo(
                 else:
                     recent_bias = 0.0
 
+            est_for_dispatch = estimated_demand.copy()
+            guard_end = min(hours, h + 6)
+            est_for_dispatch[h:guard_end] = est_for_dispatch[h:guard_end] * (1.0 + shortfall_guard_ratio)
+
             plan = optimize_dispatch(
                 prices=prices,
-                estimated_demand=estimated_demand,
+                estimated_demand=est_for_dispatch,
                 pv_available=np.where(np.arange(hours) == h, pv_available_h, pv_available),
                 soc_init=soc,
                 actuals=locked_actuals,
@@ -527,7 +558,7 @@ def run_strategy_demo(
                 battery_power_kw=battery_power_kw,
                 load_min_ratio=0.80,
                 load_max_ratio=1.10,
-                penalty_per_kwh=2.0,
+                penalty_per_kwh=6.0,
                 charge_efficiency=charge_efficiency,
                 discharge_efficiency=discharge_efficiency,
             )
@@ -586,6 +617,11 @@ def run_strategy_demo(
             if fb is not None:
                 storage_target = float(fb)
 
+        # Enforce executable storage bounds from current SoC to avoid overflow/over-discharge.
+        max_charge_exec = max(0.0, (soc_max - soc) / max(charge_efficiency, 1e-6))
+        max_discharge_exec = max(0.0, (soc - soc_min) * discharge_efficiency)
+        storage_target = float(np.clip(storage_target, -max_discharge_exec, max_charge_exec))
+
         # Convert signed storage target to effective charge/discharge used by execution.
         storage_charge_eff = max(0.0, float(storage_target))
         storage_discharge_eff = max(0.0, float(-storage_target))
@@ -593,6 +629,17 @@ def run_strategy_demo(
         net_supply = float(prices.buy_qty[h]) + pv_used + storage_discharge_eff - storage_charge_eff
         sold_back = max(0.0, net_supply - demand_exec)
         shortfall = max(0.0, demand_exec - net_supply)
+
+        # Real-time recourse: if shortfall remains, discharge extra energy within executable limits.
+        if shortfall > 0.0:
+            max_discharge_by_soc = max(0.0, (soc - soc_min) * discharge_efficiency)
+            remaining_discharge_headroom = max(0.0, min(float(battery_power_kw), max_discharge_by_soc) - storage_discharge_eff)
+            emergency_discharge = min(shortfall, remaining_discharge_headroom)
+            if emergency_discharge > 0.0:
+                storage_discharge_eff += float(emergency_discharge)
+                net_supply = float(prices.buy_qty[h]) + pv_used + storage_discharge_eff - storage_charge_eff
+                sold_back = max(0.0, net_supply - demand_exec)
+                shortfall = max(0.0, demand_exec - net_supply)
 
         buy_cost_h = float(prices.buy_price[h] * prices.buy_qty[h])
         sell_h = float(prices.sell_price[h] * sold_back)
@@ -609,6 +656,9 @@ def run_strategy_demo(
         net_h = float(sell_h - buy_cost_h - penalty_h - penalty_soc_h)
 
         soc = max(soc_min, min(soc_max, soc_next_raw))
+        if h == 23:
+            # At the end of the first 24h, enforce a fixed 30% pre-stock for next stage.
+            soc = 30.0
         actual_done[h] = demand_exec
         locked_actuals.append(HourlyActual(hour_index=h, actual_demand=float(demand_exec)))
         estimated_demand[h] = demand_exec  # keep horizon aligned to completed actual load
@@ -708,6 +758,7 @@ def run_strategy_demo(
             event["day_load_min"] = [float(x) for x in forecast_min[s:e]]
             event["day_load_max"] = [float(x) for x in forecast_max[s:e]]
             event["day_pv_mid"] = [float(x) for x in pv_available[s:e]]
+            event["day_market_hour_cap"] = [float(x) for x in prices.buy_qty[s:e]]
 
         if publisher:
             try:

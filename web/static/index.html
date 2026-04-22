@@ -103,10 +103,6 @@
               &nbsp;&nbsp;<span style="color:#7f8c8d">购电成本：</span><span id="strategyBuyCostTxt">—</span>
               &nbsp;&nbsp;<span style="color:#7f8c8d">罚款：</span><span id="strategyPenaltyTxt">—</span>
             </div>
-            <div style="font-size:12px;margin-bottom:4px">
-              <span style="color:#7f8c8d">收敛：</span><span id="strategyConvergedTxt">—</span>
-              &nbsp;&nbsp;<span style="color:#7f8c8d">迭代次数：</span><span id="strategyIterTxt">—</span>
-            </div>
             <div style="font-size:12px;color:#7f8c8d;margin-top:6px">当前小时调度目标：</div>
             <div id="strategyHourDetail" style="font-size:11px;background:#f4f7f9;border-radius:4px;padding:6px;margin-top:4px;font-family:monospace;white-space:pre;max-height:120px;overflow-y:auto">—</div>
             <div style="font-size:12px;color:#7f8c8d;margin-top:6px">策略日志：</div>
@@ -144,15 +140,16 @@
     const clearBtn = document.getElementById('clearBtn');
     const daySelect = document.getElementById('daySelect');
 
-  let data = { hour: [], forecast_min: [], forecast_max: [], forecast_mid: [], pv: [], actual: [], achieved: [], realtime_price: [], contract_price: [] };
+  let data = { hour: [], forecast_min: [], forecast_max: [], forecast_mid: [], pv: [], actual: [], achieved: [], realtime_price: [], contract_price: [], buy_qty: [], market_hour_cap: [] };
   // static per-day forecasts (populated at each day's 0:00 event)
   let forecastByDay = {1: null, 2: null, 3: null};
   let forecastMaxByDay = {1: null, 2: null, 3: null};
   let pvByDay = {1: null, 2: null, 3: null};
+  let marketHourCapByDay = {1: null, 2: null, 3: null};
   let historyByDay = {
-    1: { actual: Array(24).fill(null), achieved: Array(24).fill(null), pv: Array(24).fill(null), forecast_min: Array(24).fill(null), forecast_max: Array(24).fill(null), forecast_mid: Array(24).fill(null), realtime_price: Array(24).fill(null), contract_price: Array(24).fill(null) },
-    2: { actual: Array(24).fill(null), achieved: Array(24).fill(null), pv: Array(24).fill(null), forecast_min: Array(24).fill(null), forecast_max: Array(24).fill(null), forecast_mid: Array(24).fill(null), realtime_price: Array(24).fill(null), contract_price: Array(24).fill(null) },
-    3: { actual: Array(24).fill(null), achieved: Array(24).fill(null), pv: Array(24).fill(null), forecast_min: Array(24).fill(null), forecast_max: Array(24).fill(null), forecast_mid: Array(24).fill(null), realtime_price: Array(24).fill(null), contract_price: Array(24).fill(null) }
+    1: { actual: Array(24).fill(null), achieved: Array(24).fill(null), pv: Array(24).fill(null), forecast_min: Array(24).fill(null), forecast_max: Array(24).fill(null), forecast_mid: Array(24).fill(null), realtime_price: Array(24).fill(null), contract_price: Array(24).fill(null), buy_qty: Array(24).fill(null), market_hour_cap: Array(24).fill(null) },
+    2: { actual: Array(24).fill(null), achieved: Array(24).fill(null), pv: Array(24).fill(null), forecast_min: Array(24).fill(null), forecast_max: Array(24).fill(null), forecast_mid: Array(24).fill(null), realtime_price: Array(24).fill(null), contract_price: Array(24).fill(null), buy_qty: Array(24).fill(null), market_hour_cap: Array(24).fill(null) },
+    3: { actual: Array(24).fill(null), achieved: Array(24).fill(null), pv: Array(24).fill(null), forecast_min: Array(24).fill(null), forecast_max: Array(24).fill(null), forecast_mid: Array(24).fill(null), realtime_price: Array(24).fill(null), contract_price: Array(24).fill(null), buy_qty: Array(24).fill(null), market_hour_cap: Array(24).fill(null) }
   };
   let dayEnergyCap = null;
 
@@ -185,6 +182,7 @@
         function formatGuidanceReason(reason){
           const mapping = {
             stage_0_24_direct: '0-24h 直接仿真阶段，不启用前视储能修正',
+            stage_0_24_direct_perfect_midpoint: '0-24h 直接仿真阶段，不启用前视储能修正',
             keep_milp_storage_target: '沿用 MILP 原始储能计划',
             precharge_for_h_plus_24_deficit: '检测到 h+24 可能缺电，当前小时提前充电',
             trim_charge_for_h_plus_24_surplus: '检测到 h+24 电量富余，当前小时压低充电',
@@ -237,7 +235,7 @@
           }[priority] || priority;
           storagePriorityTxt.innerText = priorityDisplay;
 
-          const reason = evt.storage_guidance_reason || evt.adjust_reason || 'stage_0_24_direct';
+          const reason = evt.storage_guidance_reason || evt.adjust_reason || 'stage_0_24_direct_perfect_midpoint';
           storageGuidanceTxt.innerText = formatGuidanceReason(reason);
 
           const lookaheadHour = evt.storage_lookahead_hour;
@@ -248,7 +246,7 @@
           const baseTarget = evt.storage_target_base != null ? Number(evt.storage_target_base) : null;
           const finalTarget = evt.storage_target != null ? Number(evt.storage_target) : null;
 
-          if(lookaheadHour != null && reason !== 'stage_0_24_direct'){
+          if(lookaheadHour != null && reason !== 'stage_0_24_direct' && reason !== 'stage_0_24_direct_perfect_midpoint'){
             storageGuidanceDetailTxt.innerText =
               `参考时刻: h+24 = ${lookaheadHour}\n` +
               `预测负荷-已购电量: ${forecastGap != null ? forecastGap.toFixed(1) : '--'} kW\n` +
@@ -257,15 +255,15 @@
               `预计 SoC: ${projectedSoc != null ? projectedSoc.toFixed(1) : '--'} %\n` +
               `储能目标: ${baseTarget != null ? baseTarget.toFixed(1) : '--'} → ${finalTarget != null ? finalTarget.toFixed(1) : '--'} kW`;
           } else {
-            storageGuidanceDetailTxt.innerText = reason === 'stage_0_24_direct'
-              ? '当前仍处于 0-24h 直接仿真阶段，页面只展示实际执行结果。'
+            storageGuidanceDetailTxt.innerText = (reason === 'stage_0_24_direct' || reason === 'stage_0_24_direct_perfect_midpoint')
+              ? '当前处于 0-24h 直推阶段，页面仅展示执行结果。'
               : '当前小时没有触发前视储能修正。';
           }
         }
 
         function resetDayDisplay(newDay){
           // Clear hourly series data to start fresh for the new day
-          data = { hour: [], forecast_min: [], forecast_max: [], forecast_mid: [], pv: [], actual: [], achieved: [], realtime_price: [], contract_price: [] };
+          data = { hour: [], forecast_min: [], forecast_max: [], forecast_mid: [], pv: [], actual: [], achieved: [], realtime_price: [], contract_price: [], buy_qty: [], market_hour_cap: [] };
           chart.clear();
           // Reset metric text
           timeTxt.innerText = '--';
@@ -312,10 +310,36 @@
               if(evt.day_pv_mid){
                 pvByDay[d] = evt.day_pv_mid.slice();
               }
+              if(evt.day_market_hour_cap){
+                marketHourCapByDay[d] = evt.day_market_hour_cap.slice();
+                if(historyByDay[d]){
+                  historyByDay[d].market_hour_cap = evt.day_market_hour_cap.slice(0, 24);
+                }
+              }
               appendLog(`[replay] day ${d} forecast received`);
               renderChart();
             }
             return;
+          }
+
+          if(evt.day_index){
+            const d = Number(evt.day_index);
+            if(evt.day_load_min && evt.day_load_max){
+              const mins = evt.day_load_min.slice();
+              const maxs = evt.day_load_max.slice();
+              const mids = mins.map((v,i)=> (Number(mins[i]) + Number(maxs[i]))/2 );
+              forecastByDay[d] = mids;
+              forecastMaxByDay[d] = maxs.slice();
+            }
+            if(evt.day_pv_mid){
+              pvByDay[d] = evt.day_pv_mid.slice();
+            }
+            if(evt.day_market_hour_cap){
+              marketHourCapByDay[d] = evt.day_market_hour_cap.slice();
+              if(historyByDay[d]){
+                historyByDay[d].market_hour_cap = evt.day_market_hour_cap.slice(0, 24);
+              }
+            }
           }
 
           // When a new day starts (h is a multiple of 24 and h > 0), reset the display
@@ -335,6 +359,8 @@
           data.achieved.push(evt.achieved_total != null ? Number(evt.achieved_total) : null);
           data.realtime_price.push(evt.realtime_price != null ? Number(evt.realtime_price) : null);
           data.contract_price.push(evt.contract_price != null ? Number(evt.contract_price) : null);
+          data.buy_qty.push(evt.buy_qty != null ? Number(evt.buy_qty) : null);
+          data.market_hour_cap.push(evt.market_hourly_cap != null ? Number(evt.market_hourly_cap) : (evt.buy_qty != null ? Number(evt.buy_qty) : null));
           if(evt.market_daily_cap != null){
             dayEnergyCap = Number(evt.market_daily_cap);
           }
@@ -351,21 +377,8 @@
             historyByDay[dayIdx].forecast_mid[hod] = (fmin + fmax) / 2;
             historyByDay[dayIdx].realtime_price[hod] = evt.realtime_price != null ? Number(evt.realtime_price) : null;
             historyByDay[dayIdx].contract_price[hod] = evt.contract_price != null ? Number(evt.contract_price) : null;
-          }
-
-          // if this event contains the day's full forecast (sent at 0:00), capture it as static
-          if(evt.day_index){
-            const d = Number(evt.day_index);
-            if(evt.day_load_min && evt.day_load_max){
-              const mins = evt.day_load_min.slice();
-              const maxs = evt.day_load_max.slice();
-              const mids = mins.map((v,i)=> (Number(mins[i]) + Number(maxs[i]))/2 );
-              forecastByDay[d] = mids;
-              forecastMaxByDay[d] = maxs.slice();
-            }
-            if(evt.day_pv_mid){
-              pvByDay[d] = evt.day_pv_mid.slice();
-            }
+            historyByDay[dayIdx].buy_qty[hod] = evt.buy_qty != null ? Number(evt.buy_qty) : null;
+            historyByDay[dayIdx].market_hour_cap[hod] = evt.market_hourly_cap != null ? Number(evt.market_hourly_cap) : (evt.buy_qty != null ? Number(evt.buy_qty) : null);
           }
 
           timeTxt.innerText = 'Hour ' + h;
@@ -378,7 +391,7 @@
           
           updateStoragePanel(evt);
           const priority = evt.storage_priority || 'none';
-          const guidanceSummary = formatGuidanceReason(evt.storage_guidance_reason || evt.adjust_reason || 'stage_0_24_direct');
+          const guidanceSummary = formatGuidanceReason(evt.storage_guidance_reason || evt.adjust_reason || 'stage_0_24_direct_perfect_midpoint');
           
           appendLog(`H${h} • 实际 ${actualDisplay} kW → 达成 ${achievedDisplay} kW • RCA=${evt.adjust_reason || 'n/a'} | 储能=${priority} | 前视=${guidanceSummary}`);
           updateEnergyPanel();
@@ -403,6 +416,10 @@
           }
           const start = (day-1)*24;
           const end = day*24; // exclusive
+          let currentHourInDay = latestHour < start ? -1 : Math.min(23, latestHour - start);
+          if(latestHour >= end){
+            currentHourInDay = 23;
+          }
 
           // build x labels 00:00..23:00
           const hours = Array.from({length:24}, (_,i)=>String(i).padStart(2,'0')+':00');
@@ -417,6 +434,25 @@
             return out;
           };
 
+          const splitLineByCurrentHour = (arr, currentIdx) => {
+            const past = [];
+            const future = [];
+            for(let i = 0; i < arr.length; i++){
+              const value = arr[i];
+              if(currentIdx < 0){
+                past.push(null);
+                future.push(value);
+              } else if(i <= currentIdx){
+                past.push(value);
+                future.push(i === currentIdx ? value : null);
+              } else {
+                past.push(null);
+                future.push(value);
+              }
+            }
+            return { past, future };
+          };
+
           let fmid;
           let fmax;
           let fmin;
@@ -425,17 +461,23 @@
           let achieved;
           let realtimePrice;
           let contractPrice;
+          let buyQty;
+          let marketHourCap;
 
           if(sel === 0){
             // auto mode: show live/current-day buffer
             fmid = (forecastByDay[day] && forecastByDay[day].length>0) ? (()=>{ const a = forecastByDay[day].slice(0,24); while(a.length<24) a.push(null); return a; })() : sliceSeries(data.forecast_mid);
             fmax = (forecastMaxByDay[day] && forecastMaxByDay[day].length>0) ? (()=>{ const a = forecastMaxByDay[day].slice(0,24); while(a.length<24) a.push(null); return a; })() : sliceSeries(data.forecast_max);
             fmin = (fmax && fmid) ? fmid.map((m,i)=> (fmax[i] != null ? (2*m - fmax[i]) : null)) : sliceSeries(data.forecast_min);
-            pv = (pvByDay[day] && pvByDay[day].length>0) ? (()=>{ const a = pvByDay[day].slice(0,24); while(a.length<24) a.push(null); return a; })() : sliceSeries(data.pv);
+            pv = sliceSeries(data.pv);
             actual = sliceSeries(data.actual);
             achieved = sliceSeries(data.achieved);
             realtimePrice = sliceSeries(data.realtime_price);
             contractPrice = sliceSeries(data.contract_price);
+            buyQty = sliceSeries(data.buy_qty);
+            marketHourCap = (marketHourCapByDay[day] && marketHourCapByDay[day].length>0)
+              ? (()=>{ const a = marketHourCapByDay[day].slice(0,24); while(a.length<24) a.push(null); return a; })()
+              : sliceSeries(data.market_hour_cap);
           } else {
             // manual mode: show historical cache for selected day
             const hist = historyByDay[day];
@@ -447,11 +489,17 @@
             achieved = hist.achieved.slice(0,24);
             realtimePrice = hist.realtime_price.slice(0,24);
             contractPrice = hist.contract_price.slice(0,24);
+            buyQty = hist.buy_qty.slice(0,24);
+            marketHourCap = (marketHourCapByDay[day] && marketHourCapByDay[day].length>0)
+              ? marketHourCapByDay[day].slice(0,24)
+              : hist.market_hour_cap.slice(0,24);
           }
+
+          const marketHourCapSplit = splitLineByCurrentHour(marketHourCap, currentHourInDay);
 
           const option = {
             tooltip:{trigger:'axis'},
-            legend:{data:['预测中值','预测区间','物理实际','达成交互','光伏','签约价格']},
+            legend:{data:['物理实际','达成交互','光伏','Market Hour Cap','签约价格']},
             grid:{left:40,right:20,bottom:40,top:60},
             xAxis:{type:'category',data:hours},
             yAxis:[
@@ -459,12 +507,11 @@
               {type:'value',name:'价格',position:'right'}
             ],
             series:[
-              {name:'预测区间', type:'line', data:fmax, lineStyle:{opacity:0}, areaStyle:{color:'rgba(52,152,219,0.12)'}, symbol:'none', tooltip:{show:false}},
-              {name:'预测区间-min', type:'line', data:fmin, lineStyle:{opacity:0}, symbol:'none', tooltip:{show:false}},
-              {name:'预测中值', type:'line', data:fmid, smooth:true, lineStyle:{type:'dashed',color:'#3498db'}},
               {name:'物理实际', type:'bar', data:actual, itemStyle:{color:'rgba(44,62,80,0.7)'}},
               {name:'达成交互', type:'line', data:achieved, smooth:true, lineStyle:{color:'#9b59b6',width:2}},
               {name:'光伏', type:'line', data:pv, smooth:true, lineStyle:{color:'#f1c40f'}, areaStyle:{opacity:0.06}},
+              {name:'Market Hour Cap Future', type:'line', data:marketHourCapSplit.future, smooth:false, lineStyle:{color:'#c0392b',width:2,type:'dashed'}, symbol:'diamond', symbolSize:5, tooltip:{show:false}, legendHoverLink:false, z:1},
+              {name:'Market Hour Cap', type:'line', data:marketHourCapSplit.past, smooth:false, lineStyle:{color:'#c0392b',width:2,type:'solid'}, symbol:'diamond', symbolSize:5, z:2},
               {name:'签约价格', type:'line', yAxisIndex:1, data:contractPrice, smooth:false, lineStyle:{color:'#e67e22',width:2}, symbol:'circle', symbolSize:6}
             ]
           };
@@ -505,7 +552,7 @@
             updateStoragePanel(evt);
             const isDirect = evt.stage === 'direct';
             strategyPhaseTxt.textContent = isDirect
-              ? `0-24h 直接仿真（h=${evt.hour}）`
+              ? `0-24h 直推（h=${evt.hour}）`
               : `25-72h 每小时再调度（h=${evt.hour}）`;
             const la = evt.load_adj != null ? evt.load_adj.toFixed(1) : '?';
             const laReq = evt.load_adjust_requested != null ? Number(evt.load_adjust_requested).toFixed(1) : la;
@@ -566,7 +613,7 @@
         });
 
 
-    clearBtn.addEventListener('click', ()=>{ data = { hour: [], forecast_min: [], forecast_max: [], forecast_mid: [], pv: [], actual: [], achieved: [], realtime_price: [], contract_price: [] }; historyByDay = { 1: { actual: Array(24).fill(null), achieved: Array(24).fill(null), pv: Array(24).fill(null), forecast_min: Array(24).fill(null), forecast_max: Array(24).fill(null), forecast_mid: Array(24).fill(null), realtime_price: Array(24).fill(null), contract_price: Array(24).fill(null) }, 2: { actual: Array(24).fill(null), achieved: Array(24).fill(null), pv: Array(24).fill(null), forecast_min: Array(24).fill(null), forecast_max: Array(24).fill(null), forecast_mid: Array(24).fill(null), realtime_price: Array(24).fill(null), contract_price: Array(24).fill(null) }, 3: { actual: Array(24).fill(null), achieved: Array(24).fill(null), pv: Array(24).fill(null), forecast_min: Array(24).fill(null), forecast_max: Array(24).fill(null), forecast_mid: Array(24).fill(null), realtime_price: Array(24).fill(null), contract_price: Array(24).fill(null) } }; chart.clear(); logEl.innerHTML=''; totalEnergyTxt.innerText='0.0 kWh'; dayCapTxt.innerText = dayEnergyCap != null ? dayEnergyCap.toFixed(1) + ' kWh' : '-- kWh'; socTxt.innerText='-- %'; socBarFill.style.width='0%'; socBarFill.style.backgroundColor='#27ae60'; storageActionTxt.innerText='— 无动作'; storageActionTxt.style.color='#7f8c8d'; storageActionBox.style.background='#f4f7f9'; storageActionBox.style.borderLeft='none'; storageDiffTxt.innerText=''; storagePriorityTxt.innerText='--'; storageGuidanceTxt.innerText='--'; storageGuidanceDetailTxt.innerText=''; });
+    clearBtn.addEventListener('click', ()=>{ data = { hour: [], forecast_min: [], forecast_max: [], forecast_mid: [], pv: [], actual: [], achieved: [], realtime_price: [], contract_price: [], buy_qty: [], market_hour_cap: [] }; forecastByDay = {1: null, 2: null, 3: null}; forecastMaxByDay = {1: null, 2: null, 3: null}; pvByDay = {1: null, 2: null, 3: null}; marketHourCapByDay = {1: null, 2: null, 3: null}; historyByDay = { 1: { actual: Array(24).fill(null), achieved: Array(24).fill(null), pv: Array(24).fill(null), forecast_min: Array(24).fill(null), forecast_max: Array(24).fill(null), forecast_mid: Array(24).fill(null), realtime_price: Array(24).fill(null), contract_price: Array(24).fill(null), buy_qty: Array(24).fill(null), market_hour_cap: Array(24).fill(null) }, 2: { actual: Array(24).fill(null), achieved: Array(24).fill(null), pv: Array(24).fill(null), forecast_min: Array(24).fill(null), forecast_max: Array(24).fill(null), forecast_mid: Array(24).fill(null), realtime_price: Array(24).fill(null), contract_price: Array(24).fill(null), buy_qty: Array(24).fill(null), market_hour_cap: Array(24).fill(null) }, 3: { actual: Array(24).fill(null), achieved: Array(24).fill(null), pv: Array(24).fill(null), forecast_min: Array(24).fill(null), forecast_max: Array(24).fill(null), forecast_mid: Array(24).fill(null), realtime_price: Array(24).fill(null), contract_price: Array(24).fill(null), buy_qty: Array(24).fill(null), market_hour_cap: Array(24).fill(null) } }; chart.clear(); logEl.innerHTML=''; totalEnergyTxt.innerText='0.0 kWh'; dayCapTxt.innerText = dayEnergyCap != null ? dayEnergyCap.toFixed(1) + ' kWh' : '-- kWh'; socTxt.innerText='-- %'; socBarFill.style.width='0%'; socBarFill.style.backgroundColor='#27ae60'; storageActionTxt.innerText='— 无动作'; storageActionTxt.style.color='#7f8c8d'; storageActionBox.style.background='#f4f7f9'; storageActionBox.style.borderLeft='none'; storageDiffTxt.innerText=''; storagePriorityTxt.innerText='--'; storageGuidanceTxt.innerText='--'; storageGuidanceDetailTxt.innerText=''; });
     daySelect.addEventListener('change', renderChart);
 
       loadConfiguredEnergyCap();
