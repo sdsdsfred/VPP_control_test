@@ -1,0 +1,1 @@
+{"hour": 23, "pv_min": 180.19954711214945, "pv_max": 300.19954711214945, "load_forecast_min": 879.1068274107098, "load_forecast_max": 919.1068274107098, "actual_total": 1003.5583593969211, "achieved_total": 301.06750781907635, "control_status": "Optimal", "adjust_reason": "charge_storage"}

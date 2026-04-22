@@ -1,0 +1,577 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>VPP 实时可视化</title>
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/modern-normalize/1.1.0/modern-normalize.min.css">
+    <script src="https://cdn.socket.io/4.6.1/socket.io.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/echarts@5.5.0/dist/echarts.min.js"></script>
+    <style>
+      :root{ --bg:#f4f7f9; --panel:#ffffff; --muted:#7f8c8d; --accent:#3498db; }
+      body{font-family:Segoe UI,system-ui,Arial,sans-serif;background:var(--bg);margin:0;padding:18px;overflow:hidden;}
+      .wrap{display:flex;gap:18px;height:calc(100vh - 36px);overflow:hidden;}
+      .left{width:380px;display:flex;flex-direction:column;gap:12px;height:100%;overflow-y:auto;overflow-x:hidden;padding-right:4px;overscroll-behavior:contain}
+      .card{background:var(--panel);border-radius:10px;padding:14px;box-shadow:0 6px 18px rgba(0,0,0,0.06);}
+      .title{font-weight:700;color:#222;margin:0 0 8px 0}
+      .metric{display:flex;justify-content:space-between;align-items:center;padding:8px 0}
+      .metric .val{font-size:20px;font-weight:700}
+      .deltaBox{border:1px solid #e6ecf2;background:#f8fbff;border-radius:8px;padding:10px;margin-top:6px}
+      .deltaMain{font-size:28px;font-weight:800;color:#1f3a56}
+      #chartCard{flex:1;display:flex;flex-direction:column;height:100%;overflow:hidden}
+      #mainChart{flex:1;min-height:420px;height:100%}
+      #log{background:#0f1720;color:#dbeafe;padding:10px;height:220px;overflow:auto;font-family:Consolas,monospace;border-radius:6px}
+      .small{font-size:12px;color:var(--muted)}
+      .controls{display:flex;gap:8px;margin-top:8px}
+      select, button, input{padding:8px;border-radius:6px;border:1px solid #e2e8f0}
+      .soc-bar-bg{height:14px;background:#e6ecf2;border-radius:8px;overflow:hidden;margin:6px 0 2px 0}
+      .soc-bar-fill{height:100%;width:50%;border-radius:8px;transition:width 0.6s ease,background-color 0.4s ease;background:#27ae60}
+      .storage-action-box{border-radius:8px;padding:10px 12px;margin-top:6px;transition:background 0.4s ease}
+      .soc-label{display:flex;justify-content:space-between;align-items:center}
+      .guidance-box{margin-top:8px;padding:10px 12px;border-radius:8px;background:#f8fbff;border:1px solid #e1ebf5}
+      .guidance-title{font-size:12px;color:#5f6f82;margin-bottom:4px}
+      .guidance-main{font-size:14px;font-weight:700;color:#1f3a56}
+      .guidance-sub{font-size:12px;color:#607286;line-height:1.5;margin-top:4px;white-space:pre-line}
+    </style>
+  </head>
+  <body>
+      <div class="wrap">
+        <div class="left">
+          <div class="card">
+            <h3 class="title">系统指标</h3>
+            <div class="metric"><div class="small">当前时刻</div><div id="timeTxt" class="val">--</div></div>
+            <div class="metric"><div class="small">日前预测 (中值)</div><div id="predTxt" class="val">-- kW</div></div>
+            <div class="metric"><div class="small">实时实际负荷</div><div id="actualTxt" class="val">-- kW</div></div>
+            <div class="metric"><div class="small">已达成交互</div><div id="achievedTxt" class="val">-- kW</div></div>
+            <div class="controls">
+              <select id="daySelect">
+                <option value="0">自动跟随当前日</option>
+                <option value="1">Day 1 (小时 0-23)</option>
+                <option value="2">Day 2 (小时 24-47)</option>
+                <option value="3">Day 3 (小时 48-71)</option>
+              </select>
+              <button id="clearBtn">清空</button>
+            </div>
+          </div>
+
+          <div class="card">
+            <h3 class="title">能耗窗口</h3>
+            <div class="small">实时累计总能耗</div>
+            <div class="deltaBox">
+              <div id="totalEnergyTxt" class="deltaMain">0.0 kWh</div>
+            </div>
+            <div class="metric"><div class="small">当日设定耗能总额</div><div id="dayCapTxt" class="val">-- kWh</div></div>
+          </div>
+
+          <div class="card">
+            <h3 class="title">储能状态</h3>
+            <div class="soc-label">
+              <div class="small">电池电量 (SoC)</div>
+              <div id="socTxt" class="val">-- %</div>
+            </div>
+            <div class="soc-bar-bg"><div id="socBarFill" class="soc-bar-fill"></div></div>
+            <div id="storageActionBox" class="storage-action-box" style="background:#f4f7f9">
+              <div id="storageActionTxt" style="font-size:16px;font-weight:700;color:#222">-- 无动作</div>
+              <div id="storageDiffTxt" class="small" style="margin-top:4px"></div>
+            </div>
+            <div class="metric" style="margin-top:6px"><div class="small">调控优先级</div><div id="storagePriorityTxt" class="val" style="font-size:14px">--</div></div>
+            <div class="guidance-box">
+              <div class="guidance-title">前视储能判断</div>
+              <div id="storageGuidanceTxt" class="guidance-main">--</div>
+              <div id="storageGuidanceDetailTxt" class="guidance-sub"></div>
+            </div>
+          </div>
+
+          <div class="card">
+            <h3 class="title">操作日志</h3>
+            <div id="log">等待事件...</div>
+          </div>
+
+          <!-- ===== D-2/D-1/D-day 策略面板 ===== -->
+          <div class="card" id="strategyCard">
+            <h3 class="title">调度策略（D-2→D-1→D日）</h3>
+            <div style="display:flex;gap:8px;align-items:center;margin-bottom:8px">
+              <button id="startStrategyBtn" style="padding:4px 12px;background:#2980b9;color:#fff;border:none;border-radius:4px;cursor:pointer">启动策略仿真</button>
+              <span id="strategyStatusTxt" style="font-size:12px;color:#7f8c8d">未启动</span>
+            </div>
+            <div style="font-size:12px;margin-bottom:4px">
+              <span style="color:#7f8c8d">阶段：</span><span id="strategyPhaseTxt">—</span>
+            </div>
+            <div style="font-size:12px;margin-bottom:4px">
+              <span style="color:#7f8c8d">净收益（元）：</span><span id="strategyProfitTxt" style="font-weight:bold">—</span>
+              &nbsp;&nbsp;<span style="color:#7f8c8d">售电收入：</span><span id="strategySellTxt">—</span>
+              &nbsp;&nbsp;<span style="color:#7f8c8d">购电成本：</span><span id="strategyBuyCostTxt">—</span>
+              &nbsp;&nbsp;<span style="color:#7f8c8d">罚款：</span><span id="strategyPenaltyTxt">—</span>
+            </div>
+            <div style="font-size:12px;margin-bottom:4px">
+              <span style="color:#7f8c8d">收敛：</span><span id="strategyConvergedTxt">—</span>
+              &nbsp;&nbsp;<span style="color:#7f8c8d">迭代次数：</span><span id="strategyIterTxt">—</span>
+            </div>
+            <div style="font-size:12px;color:#7f8c8d;margin-top:6px">当前小时调度目标：</div>
+            <div id="strategyHourDetail" style="font-size:11px;background:#f4f7f9;border-radius:4px;padding:6px;margin-top:4px;font-family:monospace;white-space:pre;max-height:120px;overflow-y:auto">—</div>
+            <div style="font-size:12px;color:#7f8c8d;margin-top:6px">策略日志：</div>
+            <div id="strategyLog" style="font-size:11px;background:#f4f7f9;border-radius:4px;padding:6px;margin-top:4px;max-height:160px;overflow-y:auto;font-family:monospace">—</div>
+          </div>
+
+        </div>
+
+        <div id="chartCard" class="card" style="flex:1">
+          <h3 class="title">预测区间 & 实时轨迹</h3>
+          <div id="mainChart"></div>
+        </div>
+      </div>
+
+      <script>
+        const socket = io();
+        const chartDom = document.getElementById('mainChart');
+        const chart = echarts.init(chartDom, null, {renderer:'canvas'});
+
+        const timeTxt = document.getElementById('timeTxt');
+        const predTxt = document.getElementById('predTxt');
+        const actualTxt = document.getElementById('actualTxt');
+        const achievedTxt = document.getElementById('achievedTxt');
+        const totalEnergyTxt = document.getElementById('totalEnergyTxt');
+        const dayCapTxt = document.getElementById('dayCapTxt');
+        const socTxt = document.getElementById('socTxt');
+        const socBarFill = document.getElementById('socBarFill');
+        const storageActionBox = document.getElementById('storageActionBox');
+        const storageActionTxt = document.getElementById('storageActionTxt');
+        const storageDiffTxt = document.getElementById('storageDiffTxt');
+        const storagePriorityTxt = document.getElementById('storagePriorityTxt');
+        const storageGuidanceTxt = document.getElementById('storageGuidanceTxt');
+        const storageGuidanceDetailTxt = document.getElementById('storageGuidanceDetailTxt');
+        const logEl = document.getElementById('log');
+    const clearBtn = document.getElementById('clearBtn');
+    const daySelect = document.getElementById('daySelect');
+
+  let data = { hour: [], forecast_min: [], forecast_max: [], forecast_mid: [], pv: [], actual: [], achieved: [], realtime_price: [], contract_price: [] };
+  // static per-day forecasts (populated at each day's 0:00 event)
+  let forecastByDay = {1: null, 2: null, 3: null};
+  let forecastMaxByDay = {1: null, 2: null, 3: null};
+  let pvByDay = {1: null, 2: null, 3: null};
+  let historyByDay = {
+    1: { actual: Array(24).fill(null), achieved: Array(24).fill(null), pv: Array(24).fill(null), forecast_min: Array(24).fill(null), forecast_max: Array(24).fill(null), forecast_mid: Array(24).fill(null), realtime_price: Array(24).fill(null), contract_price: Array(24).fill(null) },
+    2: { actual: Array(24).fill(null), achieved: Array(24).fill(null), pv: Array(24).fill(null), forecast_min: Array(24).fill(null), forecast_max: Array(24).fill(null), forecast_mid: Array(24).fill(null), realtime_price: Array(24).fill(null), contract_price: Array(24).fill(null) },
+    3: { actual: Array(24).fill(null), achieved: Array(24).fill(null), pv: Array(24).fill(null), forecast_min: Array(24).fill(null), forecast_max: Array(24).fill(null), forecast_mid: Array(24).fill(null), realtime_price: Array(24).fill(null), contract_price: Array(24).fill(null) }
+  };
+  let dayEnergyCap = null;
+
+        async function loadConfiguredEnergyCap(){
+          try{
+            const resp = await fetch('/api/input/scenario');
+            if(!resp.ok) return;
+            const payload = await resp.json();
+            if(payload && payload.has_scenario && payload.market_daily_cap != null){
+              dayEnergyCap = Number(payload.market_daily_cap);
+              updateEnergyPanel();
+            }
+          }catch(e){
+            // keep UI responsive even when API is unavailable
+          }
+        }
+
+        function updateEnergyPanel(){
+          let total = 0.0;
+          for(let i=0; i<data.hour.length; i++){
+            const a = data.achieved[i];
+            if(a != null){
+              total += a;
+            }
+          }
+          totalEnergyTxt.innerText = total.toFixed(1) + ' kWh';
+          dayCapTxt.innerText = dayEnergyCap != null ? dayEnergyCap.toFixed(1) + ' kWh' : '-- kWh';
+        }
+
+        function formatGuidanceReason(reason){
+          const mapping = {
+            stage_0_24_direct: '0-24h 直接仿真阶段，不启用前视储能修正',
+            keep_milp_storage_target: '沿用 MILP 原始储能计划',
+            precharge_for_h_plus_24_deficit: '检测到 h+24 可能缺电，当前小时提前充电',
+            trim_charge_for_h_plus_24_surplus: '检测到 h+24 电量富余，当前小时压低充电',
+            out_of_horizon: '超出前视窗口，不做前视修正',
+          };
+          return mapping[reason] || String(reason || '未提供原因');
+        }
+
+        function updateStoragePanel(evt){
+          if(evt.storage_soc != null){
+            const soc = Number(evt.storage_soc);
+            socTxt.innerText = soc.toFixed(1) + ' %';
+            socBarFill.style.width = Math.min(100, Math.max(0, soc)).toFixed(1) + '%';
+            socBarFill.style.backgroundColor = soc < 20 ? '#e74c3c' : soc < 40 ? '#f39c12' : '#27ae60';
+          }
+
+          const storageVal = evt.storage_target != null ? Number(evt.storage_target) : 0;
+          if(storageVal > 0.01){
+            storageActionTxt.innerText = `⚡ 充电  +${storageVal.toFixed(1)} kW`;
+            storageActionTxt.style.color = '#27ae60';
+            storageActionBox.style.background = 'rgba(39,174,96,0.08)';
+            storageActionBox.style.borderLeft = '3px solid #27ae60';
+          } else if(storageVal < -0.01){
+            storageActionTxt.innerText = `⚡ 放电  ${storageVal.toFixed(1)} kW`;
+            storageActionTxt.style.color = '#e74c3c';
+            storageActionBox.style.background = 'rgba(231,76,60,0.08)';
+            storageActionBox.style.borderLeft = '3px solid #e74c3c';
+          } else {
+            storageActionTxt.innerText = '— 无动作';
+            storageActionTxt.style.color = '#7f8c8d';
+            storageActionBox.style.background = '#f4f7f9';
+            storageActionBox.style.borderLeft = 'none';
+          }
+
+          const storedDiff = Number(evt.stored_diff || 0);
+          const excessDiff = Number(evt.excess_diff || 0);
+          if(storedDiff > 0.1){
+            storageDiffTxt.innerText = `差值: ${storedDiff.toFixed(1)} kW → 存入`;
+          } else if(excessDiff > 0.1){
+            storageDiffTxt.innerText = `差值: ${excessDiff.toFixed(1)} kW → 释放`;
+          } else {
+            storageDiffTxt.innerText = '';
+          }
+
+          const priority = evt.storage_priority || 'none';
+          const priorityDisplay = {
+            storage: '🔋 储能优先',
+            load: '⚠️ 负荷降级',
+            none: '✅ 无调控'
+          }[priority] || priority;
+          storagePriorityTxt.innerText = priorityDisplay;
+
+          const reason = evt.storage_guidance_reason || evt.adjust_reason || 'stage_0_24_direct';
+          storageGuidanceTxt.innerText = formatGuidanceReason(reason);
+
+          const lookaheadHour = evt.storage_lookahead_hour;
+          const forecastGap = evt.storage_lookahead_forecast_gap != null ? Number(evt.storage_lookahead_forecast_gap) : null;
+          const recentGap = evt.storage_recent_actual_gap != null ? Number(evt.storage_recent_actual_gap) : null;
+          const effectiveGap = evt.storage_effective_gap != null ? Number(evt.storage_effective_gap) : null;
+          const projectedSoc = evt.storage_projected_soc != null ? Number(evt.storage_projected_soc) : null;
+          const baseTarget = evt.storage_target_base != null ? Number(evt.storage_target_base) : null;
+          const finalTarget = evt.storage_target != null ? Number(evt.storage_target) : null;
+
+          if(lookaheadHour != null && reason !== 'stage_0_24_direct'){
+            storageGuidanceDetailTxt.innerText =
+              `参考时刻: h+24 = ${lookaheadHour}\n` +
+              `预测负荷-已购电量: ${forecastGap != null ? forecastGap.toFixed(1) : '--'} kW\n` +
+              `上一小时实际-已购电量: ${recentGap != null ? recentGap.toFixed(1) : '--'} kW\n` +
+              `综合判断缺口: ${effectiveGap != null ? effectiveGap.toFixed(1) : '--'} kW\n` +
+              `预计 SoC: ${projectedSoc != null ? projectedSoc.toFixed(1) : '--'} %\n` +
+              `储能目标: ${baseTarget != null ? baseTarget.toFixed(1) : '--'} → ${finalTarget != null ? finalTarget.toFixed(1) : '--'} kW`;
+          } else {
+            storageGuidanceDetailTxt.innerText = reason === 'stage_0_24_direct'
+              ? '当前仍处于 0-24h 直接仿真阶段，页面只展示实际执行结果。'
+              : '当前小时没有触发前视储能修正。';
+          }
+        }
+
+        function resetDayDisplay(newDay){
+          // Clear hourly series data to start fresh for the new day
+          data = { hour: [], forecast_min: [], forecast_max: [], forecast_mid: [], pv: [], actual: [], achieved: [], realtime_price: [], contract_price: [] };
+          chart.clear();
+          // Reset metric text
+          timeTxt.innerText = '--';
+          predTxt.innerText = '-- kW';
+          actualTxt.innerText = '--';
+          achievedTxt.innerText = '--';
+          totalEnergyTxt.innerText = '0.0 kWh';
+          // Keep dayEnergyCap so the cap display remains
+          dayCapTxt.innerText = dayEnergyCap != null ? dayEnergyCap.toFixed(1) + ' kWh' : '-- kWh';
+          // Reset storage display
+          socTxt.innerText = '-- %';
+          socBarFill.style.width = '0%';
+          socBarFill.style.backgroundColor = '#27ae60';
+          storageActionTxt.innerText = '— 无动作';
+          storageActionTxt.style.color = '#7f8c8d';
+          storageActionBox.style.background = '#f4f7f9';
+          storageActionBox.style.borderLeft = 'none';
+          storageDiffTxt.innerText = '';
+          storagePriorityTxt.innerText = '--';
+          storageGuidanceTxt.innerText = '--';
+          storageGuidanceDetailTxt.innerText = '';
+          // Auto-switch day view to match
+          if(newDay && daySelect.value === '0'){
+            // keep auto mode, renderChart will pick up the new day
+          }
+          appendLog(`[day ${newDay}] 新的一天开始，画面已刷新`);
+          renderChart();
+        }
+
+        function addEvent(evt){
+          // If the event has no hour it may be a day-forecast-only replay; handle safely
+          const h = evt.hour;
+          // if there's no hour field, treat as day-forecast-only and don't push a time sample
+          if(h === undefined || h === null){
+            if(evt.day_index){
+              const d = Number(evt.day_index);
+              if(evt.day_load_min && evt.day_load_max){
+                const mins = evt.day_load_min.slice();
+                const maxs = evt.day_load_max.slice();
+                const mids = mins.map((v,i)=> (Number(mins[i]) + Number(maxs[i]))/2 );
+                forecastByDay[d] = mids;
+                forecastMaxByDay[d] = maxs.slice();
+              }
+              if(evt.day_pv_mid){
+                pvByDay[d] = evt.day_pv_mid.slice();
+              }
+              appendLog(`[replay] day ${d} forecast received`);
+              renderChart();
+            }
+            return;
+          }
+
+          // When a new day starts (h is a multiple of 24 and h > 0), reset the display
+          // Also reset when h===0 but we already have data (new simulation started after previous one)
+          if((h > 0 && h % 24 === 0) || (h === 0 && data.hour.length > 0)){
+            const newDay = h === 0 ? 1 : (Math.floor(h / 24) + 1);
+            resetDayDisplay(newDay);
+          }
+
+          data.hour.push(h);
+          const fmin = Number(evt.load_forecast_min) || 0;
+          const fmax = Number(evt.load_forecast_max) || 0;
+          data.forecast_min.push(fmin); data.forecast_max.push(fmax);
+          data.forecast_mid.push((fmin+fmax)/2);
+          data.pv.push(Number(evt.pv_min) || 0);
+          data.actual.push(evt.actual_total != null ? Number(evt.actual_total) : null);
+          data.achieved.push(evt.achieved_total != null ? Number(evt.achieved_total) : null);
+          data.realtime_price.push(evt.realtime_price != null ? Number(evt.realtime_price) : null);
+          data.contract_price.push(evt.contract_price != null ? Number(evt.contract_price) : null);
+          if(evt.market_daily_cap != null){
+            dayEnergyCap = Number(evt.market_daily_cap);
+          }
+
+          // persist history so manual day switch can replay old curves after UI reset
+          const dayIdx = Math.floor(h / 24) + 1;
+          const hod = h % 24;
+          if(historyByDay[dayIdx]){
+            historyByDay[dayIdx].actual[hod] = evt.actual_total != null ? Number(evt.actual_total) : null;
+            historyByDay[dayIdx].achieved[hod] = evt.achieved_total != null ? Number(evt.achieved_total) : null;
+            historyByDay[dayIdx].pv[hod] = Number(evt.pv_min) || 0;
+            historyByDay[dayIdx].forecast_min[hod] = fmin;
+            historyByDay[dayIdx].forecast_max[hod] = fmax;
+            historyByDay[dayIdx].forecast_mid[hod] = (fmin + fmax) / 2;
+            historyByDay[dayIdx].realtime_price[hod] = evt.realtime_price != null ? Number(evt.realtime_price) : null;
+            historyByDay[dayIdx].contract_price[hod] = evt.contract_price != null ? Number(evt.contract_price) : null;
+          }
+
+          // if this event contains the day's full forecast (sent at 0:00), capture it as static
+          if(evt.day_index){
+            const d = Number(evt.day_index);
+            if(evt.day_load_min && evt.day_load_max){
+              const mins = evt.day_load_min.slice();
+              const maxs = evt.day_load_max.slice();
+              const mids = mins.map((v,i)=> (Number(mins[i]) + Number(maxs[i]))/2 );
+              forecastByDay[d] = mids;
+              forecastMaxByDay[d] = maxs.slice();
+            }
+            if(evt.day_pv_mid){
+              pvByDay[d] = evt.day_pv_mid.slice();
+            }
+          }
+
+          timeTxt.innerText = 'Hour ' + h;
+          predTxt.innerText = ((fmin+fmax)/2).toFixed(1) + ' kW';
+          actualTxt.innerText = (data.actual[data.actual.length-1] != null) ? data.actual[data.actual.length-1].toFixed(1) + ' kW' : '--';
+          achievedTxt.innerText = (data.achieved[data.achieved.length-1] != null) ? data.achieved[data.achieved.length-1].toFixed(1) + ' kW' : '--';
+
+          const actualDisplay = (data.actual[data.actual.length-1] != null) ? data.actual[data.actual.length-1].toFixed(1) : '--';
+          const achievedDisplay = (data.achieved[data.achieved.length-1] != null) ? data.achieved[data.achieved.length-1].toFixed(1) : '--';
+          
+          updateStoragePanel(evt);
+          const priority = evt.storage_priority || 'none';
+          const guidanceSummary = formatGuidanceReason(evt.storage_guidance_reason || evt.adjust_reason || 'stage_0_24_direct');
+          
+          appendLog(`H${h} • 实际 ${actualDisplay} kW → 达成 ${achievedDisplay} kW • RCA=${evt.adjust_reason || 'n/a'} | 储能=${priority} | 前视=${guidanceSummary}`);
+          updateEnergyPanel();
+          renderChart();
+        }
+
+        function appendLog(txt){
+          const line = document.createElement('div'); line.textContent = txt; logEl.prepend(line);
+        }
+
+        function renderChart(){
+          // display only a 24-hour window corresponding to selected day
+          // daySelect: 0=auto, 1,2,3
+          const sel = parseInt(daySelect.value, 10) || 0;
+          // determine latest hour index
+          const latestHour = data.hour.length ? data.hour[data.hour.length-1] : -1;
+          let day = 1;
+          if(sel === 0) {
+            day = Math.min(3, Math.max(1, Math.floor(latestHour/24) + 1));
+          } else {
+            day = Math.min(3, Math.max(1, sel));
+          }
+          const start = (day-1)*24;
+          const end = day*24; // exclusive
+
+          // build x labels 00:00..23:00
+          const hours = Array.from({length:24}, (_,i)=>String(i).padStart(2,'0')+':00');
+
+          // helper to get series slice for hour index range [start,end)
+          const sliceSeries = (arr) => {
+            const out = [];
+            for(let h=start; h<end; h++){
+              const idx = data.hour.indexOf(h);
+              out.push(idx>=0 ? arr[idx] : null);
+            }
+            return out;
+          };
+
+          let fmid;
+          let fmax;
+          let fmin;
+          let pv;
+          let actual;
+          let achieved;
+          let realtimePrice;
+          let contractPrice;
+
+          if(sel === 0){
+            // auto mode: show live/current-day buffer
+            fmid = (forecastByDay[day] && forecastByDay[day].length>0) ? (()=>{ const a = forecastByDay[day].slice(0,24); while(a.length<24) a.push(null); return a; })() : sliceSeries(data.forecast_mid);
+            fmax = (forecastMaxByDay[day] && forecastMaxByDay[day].length>0) ? (()=>{ const a = forecastMaxByDay[day].slice(0,24); while(a.length<24) a.push(null); return a; })() : sliceSeries(data.forecast_max);
+            fmin = (fmax && fmid) ? fmid.map((m,i)=> (fmax[i] != null ? (2*m - fmax[i]) : null)) : sliceSeries(data.forecast_min);
+            pv = (pvByDay[day] && pvByDay[day].length>0) ? (()=>{ const a = pvByDay[day].slice(0,24); while(a.length<24) a.push(null); return a; })() : sliceSeries(data.pv);
+            actual = sliceSeries(data.actual);
+            achieved = sliceSeries(data.achieved);
+            realtimePrice = sliceSeries(data.realtime_price);
+            contractPrice = sliceSeries(data.contract_price);
+          } else {
+            // manual mode: show historical cache for selected day
+            const hist = historyByDay[day];
+            fmid = (forecastByDay[day] && forecastByDay[day].length>0) ? forecastByDay[day].slice(0,24) : hist.forecast_mid.slice(0,24);
+            fmax = (forecastMaxByDay[day] && forecastMaxByDay[day].length>0) ? forecastMaxByDay[day].slice(0,24) : hist.forecast_max.slice(0,24);
+            fmin = (fmax && fmid) ? fmid.map((m,i)=> (fmax[i] != null ? (2*m - fmax[i]) : null)) : hist.forecast_min.slice(0,24);
+            pv = (pvByDay[day] && pvByDay[day].length>0) ? pvByDay[day].slice(0,24) : hist.pv.slice(0,24);
+            actual = hist.actual.slice(0,24);
+            achieved = hist.achieved.slice(0,24);
+            realtimePrice = hist.realtime_price.slice(0,24);
+            contractPrice = hist.contract_price.slice(0,24);
+          }
+
+          const option = {
+            tooltip:{trigger:'axis'},
+            legend:{data:['预测中值','预测区间','物理实际','达成交互','光伏','签约价格']},
+            grid:{left:40,right:20,bottom:40,top:60},
+            xAxis:{type:'category',data:hours},
+            yAxis:[
+              {type:'value',name:'kW'},
+              {type:'value',name:'价格',position:'right'}
+            ],
+            series:[
+              {name:'预测区间', type:'line', data:fmax, lineStyle:{opacity:0}, areaStyle:{color:'rgba(52,152,219,0.12)'}, symbol:'none', tooltip:{show:false}},
+              {name:'预测区间-min', type:'line', data:fmin, lineStyle:{opacity:0}, symbol:'none', tooltip:{show:false}},
+              {name:'预测中值', type:'line', data:fmid, smooth:true, lineStyle:{type:'dashed',color:'#3498db'}},
+              {name:'物理实际', type:'bar', data:actual, itemStyle:{color:'rgba(44,62,80,0.7)'}},
+              {name:'达成交互', type:'line', data:achieved, smooth:true, lineStyle:{color:'#9b59b6',width:2}},
+              {name:'光伏', type:'line', data:pv, smooth:true, lineStyle:{color:'#f1c40f'}, areaStyle:{opacity:0.06}},
+              {name:'签约价格', type:'line', yAxisIndex:1, data:contractPrice, smooth:false, lineStyle:{color:'#e67e22',width:2}, symbol:'circle', symbolSize:6}
+            ]
+          };
+          chart.setOption(option, true);
+        }
+
+        socket.on('connect', ()=>{ appendLog('[socket] connected'); });
+        socket.on('disconnect', ()=>{ appendLog('[socket] disconnected'); });
+        socket.on('update', (evt)=>{ try{ addEvent(evt); } catch(e){ console.error(e) }});
+        socket.on('strategy_update', (evt)=>{ try{ handleStrategyEvent(evt); } catch(e){ console.error(e) }});
+
+        // --- Strategy panel ---
+        const startStrategyBtn   = document.getElementById('startStrategyBtn');
+        const strategyStatusTxt  = document.getElementById('strategyStatusTxt');
+        const strategyPhaseTxt   = document.getElementById('strategyPhaseTxt');
+        const strategyProfitTxt  = document.getElementById('strategyProfitTxt');
+        const strategySellTxt    = document.getElementById('strategySellTxt');
+        const strategyBuyCostTxt = document.getElementById('strategyBuyCostTxt');
+        const strategyPenaltyTxt = document.getElementById('strategyPenaltyTxt');
+        const strategyConvergedTxt = document.getElementById('strategyConvergedTxt');
+        const strategyIterTxt    = document.getElementById('strategyIterTxt');
+        const strategyHourDetail = document.getElementById('strategyHourDetail');
+        const strategyLog        = document.getElementById('strategyLog');
+
+        function appendStrategyLog(msg) {
+          const line = document.createElement('div');
+          line.textContent = msg;
+          if (strategyLog.firstChild && strategyLog.firstChild.textContent === '—') strategyLog.innerHTML = '';
+          strategyLog.appendChild(line);
+          strategyLog.scrollTop = strategyLog.scrollHeight;
+        }
+
+        function handleStrategyEvent(evt) {
+          const t = evt.type || '?';
+          strategyStatusTxt.textContent = '运行中';
+
+          if (t === 'strategy_hour') {
+            updateStoragePanel(evt);
+            const isDirect = evt.stage === 'direct';
+            strategyPhaseTxt.textContent = isDirect
+              ? `0-24h 直接仿真（h=${evt.hour}）`
+              : `25-72h 每小时再调度（h=${evt.hour}）`;
+            const la = evt.load_adj != null ? evt.load_adj.toFixed(1) : '?';
+            const laReq = evt.load_adjust_requested != null ? Number(evt.load_adjust_requested).toFixed(1) : la;
+            const laExec = evt.load_adjust_estimated != null ? Number(evt.load_adjust_estimated).toFixed(1) : la;
+            const sc = evt.storage_charge != null ? evt.storage_charge.toFixed(1) : '?';
+            const sd = evt.storage_discharge != null ? evt.storage_discharge.toFixed(1) : '?';
+            const stReq = evt.storage_target_requested != null ? Number(evt.storage_target_requested).toFixed(1) : (evt.storage_target != null ? Number(evt.storage_target).toFixed(1) : '?');
+            const stExec = evt.storage_target != null ? Number(evt.storage_target).toFixed(1) : '?';
+            const stBase = evt.storage_target_base != null ? Number(evt.storage_target_base).toFixed(1) : stReq;
+            const pvc = evt.pv_curtail != null ? evt.pv_curtail.toFixed(1) : '?';
+            const sf = evt.shortfall != null ? evt.shortfall.toFixed(1) : '0.0';
+            const sb = evt.sold_back != null ? evt.sold_back.toFixed(1) : '?';
+            const guidanceReason = evt.storage_guidance_reason || 'keep_milp_storage_target';
+            const guidanceText = formatGuidanceReason(guidanceReason);
+            const lookaheadHour = evt.storage_lookahead_hour != null ? evt.storage_lookahead_hour : '--';
+            const effectiveGap = evt.storage_effective_gap != null ? Number(evt.storage_effective_gap).toFixed(1) : '--';
+            const projectedSoc = evt.storage_projected_soc != null ? Number(evt.storage_projected_soc).toFixed(1) : '--';
+            strategyHourDetail.textContent =
+              `h=${evt.hour}  负荷调节(请求/可执行): ${laReq} / ${laExec} kW\n` +
+              `储能目标(MILP/修正后/可执行): ${stBase} / ${stReq} / ${stExec} kW\n` +
+              `储能充电: ${sc} kW   储能放电: ${sd} kW   SoC: ${evt.storage_soc!=null?Number(evt.storage_soc).toFixed(1):'?'} %\n` +
+              `弃光: ${pvc} kW   售电: ${sb} kWh   缺口: ${sf} kWh\n` +
+              `前视判断: ${guidanceText}\n` +
+              `参考时刻 h+24: ${lookaheadHour}   综合缺口: ${effectiveGap} kW   预计 SoC: ${projectedSoc} %\n` +
+              `购电价: ${evt.buy_price!=null?evt.buy_price.toFixed(4):'?'} 元/kWh   售电价: ${evt.sell_price!=null?evt.sell_price.toFixed(4):'?'} 元/kWh`;
+            appendStrategyLog(`[h=${evt.hour}] ${isDirect?'直接仿真':'再调度后执行'} 负荷${la>=0?'+':''}${la}kW 充${sc}kW 放${sd}kW 售${sb}kWh 缺${sf}kWh | 前视=${guidanceText}`);
+          }
+
+          // Always update financials if present
+          if (evt.net_profit  != null) strategyProfitTxt.textContent = evt.net_profit.toFixed(2) + ' 元';
+          if (evt.sell_revenue!= null) strategySellTxt.textContent   = evt.sell_revenue.toFixed(2) + ' 元';
+          if (evt.buy_cost    != null) strategyBuyCostTxt.textContent = evt.buy_cost.toFixed(2) + ' 元';
+          if (evt.penalty     != null) strategyPenaltyTxt.textContent = evt.penalty.toFixed(2) + ' 元';
+          if (evt.sell_revenue_hour != null) strategySellTxt.textContent = evt.sell_revenue_hour.toFixed(2) + ' 元 (本小时)';
+          if (evt.converged   != null) strategyConvergedTxt.textContent = evt.converged ? '✓ 已收敛' : '未收敛';
+          if (evt.iterations  != null) strategyIterTxt.textContent = String(evt.iterations);
+        }
+
+        startStrategyBtn.addEventListener('click', () => {
+          fetch('/api/strategy/start', {
+            method: 'POST',
+            headers: {'Content-Type':'application/json'},
+            body: JSON.stringify({seed:42, delay_seconds:2.0, soc_init:30, base_demand:800}),
+          })
+          .then(r=>{
+            if (!r.ok) return r.text().then(t=>{ throw new Error(`HTTP ${r.status}: ${t.slice(0,200)}`); });
+            return r.json();
+          })
+          .then(d=>{
+            if (d.ok) {
+              strategyStatusTxt.textContent = '已启动（等待事件...）';
+              appendStrategyLog('[系统] 策略仿真已启动');
+            } else {
+              appendStrategyLog('[错误] ' + (d.error||'未知错误'));
+            }
+          })
+          .catch(e=>appendStrategyLog('[错误] '+e.message));
+        });
+
+
+    clearBtn.addEventListener('click', ()=>{ data = { hour: [], forecast_min: [], forecast_max: [], forecast_mid: [], pv: [], actual: [], achieved: [], realtime_price: [], contract_price: [] }; historyByDay = { 1: { actual: Array(24).fill(null), achieved: Array(24).fill(null), pv: Array(24).fill(null), forecast_min: Array(24).fill(null), forecast_max: Array(24).fill(null), forecast_mid: Array(24).fill(null), realtime_price: Array(24).fill(null), contract_price: Array(24).fill(null) }, 2: { actual: Array(24).fill(null), achieved: Array(24).fill(null), pv: Array(24).fill(null), forecast_min: Array(24).fill(null), forecast_max: Array(24).fill(null), forecast_mid: Array(24).fill(null), realtime_price: Array(24).fill(null), contract_price: Array(24).fill(null) }, 3: { actual: Array(24).fill(null), achieved: Array(24).fill(null), pv: Array(24).fill(null), forecast_min: Array(24).fill(null), forecast_max: Array(24).fill(null), forecast_mid: Array(24).fill(null), realtime_price: Array(24).fill(null), contract_price: Array(24).fill(null) } }; chart.clear(); logEl.innerHTML=''; totalEnergyTxt.innerText='0.0 kWh'; dayCapTxt.innerText = dayEnergyCap != null ? dayEnergyCap.toFixed(1) + ' kWh' : '-- kWh'; socTxt.innerText='-- %'; socBarFill.style.width='0%'; socBarFill.style.backgroundColor='#27ae60'; storageActionTxt.innerText='— 无动作'; storageActionTxt.style.color='#7f8c8d'; storageActionBox.style.background='#f4f7f9'; storageActionBox.style.borderLeft='none'; storageDiffTxt.innerText=''; storagePriorityTxt.innerText='--'; storageGuidanceTxt.innerText='--'; storageGuidanceDetailTxt.innerText=''; });
+    daySelect.addEventListener('change', renderChart);
+
+      loadConfiguredEnergyCap();
+        renderChart();
+        window.addEventListener('resize', ()=>chart.resize());
+      </script>
+    </body>
+  </html>
